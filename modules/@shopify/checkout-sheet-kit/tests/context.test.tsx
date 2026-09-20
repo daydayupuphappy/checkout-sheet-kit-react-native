@@ -5,7 +5,12 @@ import {
   ShopifyCheckoutSheetProvider,
   useShopifyCheckoutSheet,
 } from '../src/context';
-import {ApplePayContactField, ColorScheme, type Configuration} from '../src';
+import {
+  ApplePayContactField,
+  ColorScheme,
+  ShopifyCheckoutSheet,
+  type Configuration,
+} from '../src';
 
 const checkoutUrl = 'https://shopify.com/checkout';
 const config: Configuration = {
@@ -13,6 +18,20 @@ const config: Configuration = {
 };
 
 jest.mock('react-native');
+
+// @ts-expect-error "eventEmitter is private"
+const eventEmitter = ShopifyCheckoutSheet.eventEmitter;
+
+const acceleratedCheckouts = {
+  storefrontDomain: 'test-shop.myshopify.com',
+  storefrontAccessToken: 'shpat_test_token',
+};
+
+async function flushEffects() {
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
 
 const HookTestComponent = ({
   onHookValue,
@@ -74,7 +93,18 @@ describe('ShopifyCheckoutSheetProvider', () => {
     ).not.toHaveBeenCalled();
   });
 
+  it('renders children', () => {
+    const {getByTestId} = render(
+      <TestComponent>
+        {React.createElement('View', {testID: 'child'})}
+      </TestComponent>,
+    );
+
+    expect(getByTestId('child')).toBeTruthy();
+  });
+
   it('configures accelerated checkouts when provided', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
     (Platform as any).Version = '17.0';
     (
       NativeModules.ShopifyCheckoutSheetKit
@@ -122,6 +152,193 @@ describe('ShopifyCheckoutSheetProvider', () => {
       ['email'],
       [],
     );
+
+    warnSpy.mockRestore();
+  });
+
+  describe('deprecation warning', () => {
+    let warnSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    async function renderWithCustomer(
+      customer: NonNullable<Configuration['acceleratedCheckouts']>['customer'],
+    ) {
+      render(
+        <ShopifyCheckoutSheetProvider
+          configuration={{
+            ...config,
+            acceleratedCheckouts: {...acceleratedCheckouts, customer},
+          }}>
+          <MockChild />
+        </ShopifyCheckoutSheetProvider>,
+      );
+      await flushEffects();
+    }
+
+    it('warns when accessToken is combined with email', async () => {
+      await renderWithCustomer({
+        accessToken: 'customer-access-token',
+        email: 'test@example.com',
+      });
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '[ShopifyCheckoutSheetKit] Providing accessToken with contactFields',
+        ),
+      );
+    });
+
+    it('warns when accessToken is combined with phoneNumber', async () => {
+      await renderWithCustomer({
+        accessToken: 'customer-access-token',
+        phoneNumber: '+123',
+      });
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not warn when only accessToken is provided', async () => {
+      await renderWithCustomer({accessToken: 'customer-access-token'});
+
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not warn when only contact fields are provided', async () => {
+      await renderWithCustomer({
+        email: 'test@example.com',
+        phoneNumber: '+123',
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not warn when no customer is provided', async () => {
+      await renderWithCustomer(undefined);
+
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('acceleratedCheckoutsAvailable', () => {
+    const configureAcceleratedCheckouts = NativeModules.ShopifyCheckoutSheetKit
+      .configureAcceleratedCheckouts as jest.Mock;
+
+    afterEach(() => {
+      configureAcceleratedCheckouts.mockReturnValue(true);
+    });
+
+    async function renderAndGetHookValue(configuration?: Configuration) {
+      let hookValue: any;
+      render(
+        <ShopifyCheckoutSheetProvider configuration={configuration}>
+          <HookTestComponent
+            onHookValue={value => {
+              hookValue = value;
+            }}
+          />
+        </ShopifyCheckoutSheetProvider>,
+      );
+      await flushEffects();
+      return hookValue;
+    }
+
+    it('is false when accelerated checkouts are not configured', async () => {
+      const hookValue = await renderAndGetHookValue(config);
+
+      expect(hookValue.acceleratedCheckoutsAvailable).toBe(false);
+      expect(configureAcceleratedCheckouts).not.toHaveBeenCalled();
+    });
+
+    it('is true when native configuration succeeds', async () => {
+      configureAcceleratedCheckouts.mockReturnValue(true);
+
+      const hookValue = await renderAndGetHookValue({
+        ...config,
+        acceleratedCheckouts,
+      });
+
+      expect(hookValue.acceleratedCheckoutsAvailable).toBe(true);
+    });
+
+    it('is false when native configuration fails', async () => {
+      configureAcceleratedCheckouts.mockReturnValue(false);
+
+      const hookValue = await renderAndGetHookValue({
+        ...config,
+        acceleratedCheckouts,
+      });
+
+      expect(hookValue.acceleratedCheckoutsAvailable).toBe(false);
+    });
+  });
+
+  it('applies a new configuration when the prop changes', async () => {
+    const newConfig: Configuration = {colorScheme: ColorScheme.dark};
+    const {rerender} = render(
+      <ShopifyCheckoutSheetProvider configuration={config}>
+        <MockChild />
+      </ShopifyCheckoutSheetProvider>,
+    );
+    await flushEffects();
+
+    rerender(
+      <ShopifyCheckoutSheetProvider configuration={newConfig}>
+        <MockChild />
+      </ShopifyCheckoutSheetProvider>,
+    );
+    await flushEffects();
+
+    expect(
+      NativeModules.ShopifyCheckoutSheetKit.setConfig,
+    ).toHaveBeenLastCalledWith(newConfig);
+  });
+
+  describe('features', () => {
+    const originalPlatform = Platform.OS;
+
+    beforeEach(() => {
+      Platform.OS = 'android';
+    });
+
+    afterAll(() => {
+      Platform.OS = originalPlatform;
+    });
+
+    it('forwards features to the ShopifyCheckoutSheet instance', () => {
+      render(
+        <ShopifyCheckoutSheetProvider
+          configuration={config}
+          features={{handleGeolocationRequests: false}}>
+          <MockChild />
+        </ShopifyCheckoutSheetProvider>,
+      );
+
+      expect(eventEmitter.addListener).not.toHaveBeenCalledWith(
+        'geolocationRequest',
+        expect.any(Function),
+      );
+    });
+
+    it('uses default features when none are provided', () => {
+      render(
+        <ShopifyCheckoutSheetProvider configuration={config}>
+          <MockChild />
+        </ShopifyCheckoutSheetProvider>,
+      );
+
+      expect(eventEmitter.addListener).toHaveBeenCalledWith(
+        'geolocationRequest',
+        expect.any(Function),
+      );
+    });
   });
 
   it('reuses the same instance across re-renders', () => {
@@ -186,7 +403,7 @@ describe('useShopifyCheckoutSheet', () => {
       hookValue.removeEventListeners('close');
     });
 
-    expect(hookValue.removeEventListeners).toBeDefined();
+    expect(eventEmitter.removeAllListeners).toHaveBeenCalledWith('close');
   });
 
   it('provides present function and calls it with checkoutUrl', () => {
@@ -388,6 +605,47 @@ describe('useShopifyCheckoutSheet', () => {
     const subscription = hookValue.addEventListener('close', jest.fn());
     expect(subscription).toBeDefined();
     expect(subscription.remove).toBeDefined();
+  });
+
+  it('addEventListener forwards the event to the emitter', () => {
+    let hookValue: any;
+    const onHookValue = (value: any) => {
+      hookValue = value;
+    };
+    const callback = jest.fn();
+
+    render(
+      <Wrapper>
+        <HookTestComponent onHookValue={onHookValue} />
+      </Wrapper>,
+    );
+
+    hookValue.addEventListener('close', callback);
+    expect(eventEmitter.addListener).toHaveBeenCalledWith(
+      'close',
+      expect.any(Function),
+    );
+
+    eventEmitter.emit('close');
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the context value stable across re-renders', () => {
+    const values: any[] = [];
+    const {rerender} = render(
+      <Wrapper>
+        <HookTestComponent onHookValue={value => values.push(value)} />
+      </Wrapper>,
+    );
+
+    rerender(
+      <Wrapper>
+        <HookTestComponent onHookValue={value => values.push(value)} />
+      </Wrapper>,
+    );
+
+    expect(values.length).toBeGreaterThanOrEqual(2);
+    expect(values[values.length - 1]).toBe(values[0]);
   });
 });
 
