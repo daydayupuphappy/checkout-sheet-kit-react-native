@@ -85,18 +85,21 @@ export function CartProvider({children}: PropsWithChildren) {
     setCheckoutUrl(undefined);
   }, []);
 
+  // Restore a cart persisted from a previous visit. Runs only on mount so it
+  // never races with the refetch issued by addToCart after cartCreate.
   useEffect(() => {
-    if (!cartId) {
+    const storedCartId = localStorage.getItem(CART_ID_STORAGE_KEY);
+    if (!storedCartId) {
       return;
     }
-    fetchCart({variables: {cartId, country}}).then(result => {
+    fetchCart({variables: {cartId: storedCartId, country}}).then(result => {
       if (result.data && result.data.cart === null) {
         clearCart();
       } else if (result.data?.cart) {
         setCheckoutUrl(result.data.cart.checkoutUrl);
       }
     });
-  }, [cartId, country, fetchCart, clearCart]);
+  }, []);
 
   const track = useCallback(async (key: string, work: () => Promise<void>) => {
     setPending(prev => new Set(prev).add(key));
