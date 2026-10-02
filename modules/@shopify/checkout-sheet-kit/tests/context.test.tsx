@@ -5,7 +5,12 @@ import {
   ShopifyCheckoutSheetProvider,
   useShopifyCheckoutSheet,
 } from '../src/context';
-import {ApplePayContactField, ColorScheme, type Configuration} from '../src';
+import {
+  ApplePayContactField,
+  ColorScheme,
+  ShopifyCheckoutSheet,
+  type Configuration,
+} from '../src';
 
 const checkoutUrl = 'https://shopify.com/checkout';
 const config: Configuration = {
@@ -13,6 +18,14 @@ const config: Configuration = {
 };
 
 jest.mock('react-native');
+
+// @ts-expect-error "eventEmitter is private"
+const eventEmitter = ShopifyCheckoutSheet.eventEmitter;
+
+const flushEffects = () =>
+  act(async () => {
+    await Promise.resolve();
+  });
 
 const HookTestComponent = ({
   onHookValue,
@@ -33,7 +46,15 @@ describe('ShopifyCheckoutSheetProvider', () => {
     </ShopifyCheckoutSheetProvider>
   );
 
+  const originalPlatform = {OS: Platform.OS, Version: Platform.Version};
+
   afterEach(() => {
+    Platform.OS = originalPlatform.OS;
+    (Platform as any).Version = originalPlatform.Version;
+    (
+      NativeModules.ShopifyCheckoutSheetKit
+        .configureAcceleratedCheckouts as unknown as {mockReturnValue: any}
+    ).mockReturnValue(true);
     jest.clearAllMocks();
   });
 
@@ -75,6 +96,7 @@ describe('ShopifyCheckoutSheetProvider', () => {
   });
 
   it('configures accelerated checkouts when provided', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
     (Platform as any).Version = '17.0';
     (
       NativeModules.ShopifyCheckoutSheetKit
@@ -122,6 +144,8 @@ describe('ShopifyCheckoutSheetProvider', () => {
       ['email'],
       [],
     );
+
+    warnSpy.mockRestore();
   });
 
   it('reuses the same instance across re-renders', () => {
@@ -140,6 +164,178 @@ describe('ShopifyCheckoutSheetProvider', () => {
     expect(
       NativeModules.ShopifyCheckoutSheetKit.setConfig.mock.calls,
     ).toHaveLength(2);
+  });
+
+  it('re-applies configuration on the same instance when the configuration prop changes', () => {
+    const updatedConfig: Configuration = {colorScheme: ColorScheme.dark};
+
+    const {rerender} = render(
+      <ShopifyCheckoutSheetProvider configuration={config}>
+        <MockChild />
+      </ShopifyCheckoutSheetProvider>,
+    );
+
+    rerender(
+      <ShopifyCheckoutSheetProvider configuration={updatedConfig}>
+        <MockChild />
+      </ShopifyCheckoutSheetProvider>,
+    );
+
+    const {setConfig} = NativeModules.ShopifyCheckoutSheetKit;
+    // constructor + initial effect + effect for the updated prop
+    expect(setConfig.mock.calls).toEqual([[config], [config], [updatedConfig]]);
+  });
+
+  describe('acceleratedCheckoutsAvailable', () => {
+    const acceleratedConfig: Configuration = {
+      ...config,
+      acceleratedCheckouts: {
+        storefrontDomain: 'test-shop.myshopify.com',
+        storefrontAccessToken: 'shpat_test_token',
+      },
+    };
+
+    const renderAndCollect = async (configuration: Configuration) => {
+      const values: boolean[] = [];
+      render(
+        <ShopifyCheckoutSheetProvider configuration={configuration}>
+          <HookTestComponent
+            onHookValue={value =>
+              values.push(value.acceleratedCheckoutsAvailable)
+            }
+          />
+        </ShopifyCheckoutSheetProvider>,
+      );
+      await flushEffects();
+      return values;
+    };
+
+    beforeEach(() => {
+      (Platform as any).Version = '17.0';
+    });
+
+    it('starts false and becomes true once accelerated checkouts are configured', async () => {
+      const values = await renderAndCollect(acceleratedConfig);
+
+      expect(values[0]).toBe(false);
+      expect(values[values.length - 1]).toBe(true);
+    });
+
+    it('stays false when accelerated checkouts are not configured', async () => {
+      const values = await renderAndCollect(config);
+
+      expect(values).not.toContain(true);
+    });
+
+    it('stays false when native configuration fails', async () => {
+      (
+        NativeModules.ShopifyCheckoutSheetKit
+          .configureAcceleratedCheckouts as unknown as {mockReturnValue: any}
+      ).mockReturnValue(false);
+
+      const values = await renderAndCollect(acceleratedConfig);
+
+      expect(values).not.toContain(true);
+    });
+
+    it('stays false on iOS versions below 16', async () => {
+      (Platform as any).Version = '15.0';
+
+      const values = await renderAndCollect(acceleratedConfig);
+
+      expect(values).not.toContain(true);
+      expect(
+        NativeModules.ShopifyCheckoutSheetKit.configureAcceleratedCheckouts,
+      ).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('accessToken deprecation warning', () => {
+    type Customer = NonNullable<
+      Configuration['acceleratedCheckouts']
+    >['customer'];
+
+    const renderWithCustomer = async (customer: Customer) => {
+      render(
+        <ShopifyCheckoutSheetProvider
+          configuration={{
+            ...config,
+            acceleratedCheckouts: {
+              storefrontDomain: 'test-shop.myshopify.com',
+              storefrontAccessToken: 'shpat_test_token',
+              customer,
+            },
+          }}>
+          <MockChild />
+        </ShopifyCheckoutSheetProvider>,
+      );
+      await flushEffects();
+    };
+
+    let warnSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    it.each<[string, Customer]>([
+      ['email', {accessToken: 'token', email: 'test@example.com'}],
+      ['phoneNumber', {accessToken: 'token', phoneNumber: '+123'}],
+    ])('warns when accessToken is combined with %s', async (_, customer) => {
+      await renderWithCustomer(customer);
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Providing accessToken with contactFields'),
+      );
+    });
+
+    it.each<[string, Customer]>([
+      ['accessToken only', {accessToken: 'token'}],
+      ['contact fields only', {email: 'test@example.com', phoneNumber: '+123'}],
+    ])('does not warn for %s', async (_, customer) => {
+      await renderWithCustomer(customer);
+
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('features', () => {
+    beforeEach(() => {
+      Platform.OS = 'android';
+    });
+
+    it('handles geolocation requests on Android by default', () => {
+      render(
+        <ShopifyCheckoutSheetProvider configuration={config}>
+          <MockChild />
+        </ShopifyCheckoutSheetProvider>,
+      );
+
+      expect(eventEmitter.addListener).toHaveBeenCalledWith(
+        'geolocationRequest',
+        expect.any(Function),
+      );
+    });
+
+    it('does not handle geolocation requests when the feature is disabled', () => {
+      render(
+        <ShopifyCheckoutSheetProvider
+          configuration={config}
+          features={{handleGeolocationRequests: false}}>
+          <MockChild />
+        </ShopifyCheckoutSheetProvider>,
+      );
+
+      expect(eventEmitter.addListener).not.toHaveBeenCalledWith(
+        'geolocationRequest',
+        expect.any(Function),
+      );
+    });
   });
 });
 
@@ -388,6 +584,40 @@ describe('useShopifyCheckoutSheet', () => {
     const subscription = hookValue.addEventListener('close', jest.fn());
     expect(subscription).toBeDefined();
     expect(subscription.remove).toBeDefined();
+  });
+
+  it('delivers emitted events to listeners added via addEventListener', () => {
+    let hookValue: any;
+    const callback = jest.fn();
+
+    render(
+      <Wrapper>
+        <HookTestComponent onHookValue={value => (hookValue = value)} />
+      </Wrapper>,
+    );
+
+    hookValue.addEventListener('close', callback);
+    eventEmitter.emit('close');
+
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  it('removeEventListeners stops delivery for that event', () => {
+    let hookValue: any;
+    const callback = jest.fn();
+
+    render(
+      <Wrapper>
+        <HookTestComponent onHookValue={value => (hookValue = value)} />
+      </Wrapper>,
+    );
+
+    hookValue.addEventListener('close', callback);
+    hookValue.removeEventListeners('close');
+    eventEmitter.emit('close');
+
+    expect(eventEmitter.removeAllListeners).toHaveBeenCalledWith('close');
+    expect(callback).not.toHaveBeenCalled();
   });
 });
 
